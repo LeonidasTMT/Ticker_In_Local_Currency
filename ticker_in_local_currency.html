@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Ticker in Local Currency</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 1000px; margin: 30px auto; }
+h1 { margin-bottom: 10px; }
+.controls { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 15px; }
+input, select, button { padding: 6px 10px; font-size: 14px; }
+.ranges button { margin-right: 5px; margin-bottom:5px; }
+#info { margin: 10px 0; color: #555; }
+#chart { margin-top: 20px; }
+#dataTable { display: none; margin-top: 20px; max-height: 300px; overflow-y: auto; border-collapse: collapse; width: 100%; }
+#dataTable th, #dataTable td { border: 1px solid #ddd; padding: 8px; text-align: right; }
+#dataTable th { background-color: #f2f2f2; }
+#measure { margin-top:10px; font-weight:bold; }
+</style>
+</head>
+<body>
+
+<h1>Ticker in Local Currency</h1>
+
+<div class="controls">
+  <input id="ticker" placeholder="VWRA.L">
+  <input id="targetCurrency" placeholder="Target currency (e.g., MYR)" style="width:150px;">
+  <button onclick="loadData()">Convert & Plot</button>
+  <button onclick="toggleTable()">Show/Hide Data</button>
+</div>
+
+<div class="ranges">
+  <button onclick="setRange('MAX')">Since inception</button>
+  <button onclick="setRange('5Y')">5Y</button>
+  <button onclick="setRange('1Y')">1Y</button>
+  <button onclick="setRange('YTD')">YTD</button>
+  <button onclick="setRange('6M')">6M</button>
+  <button onclick="setRange('3M')">3M</button>
+</div>
+
+<div id="info"></div>
+<div id="measure"></div>
+<div id="chart"></div>
+
+<table id="dataTable">
+  <thead>
+    <tr><th>Date</th><th>Original</th><th>FX Rate</th><th>Converted</th></tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<script>
+let fullData = [];
+let currentRange = 'MAX';
+let detectedCurrency = '';
+
+async function loadData() {
+  const ticker = document.getElementById('ticker').value.trim();
+  const target = document.getElementById('targetCurrency').value.trim().toUpperCase();
+  if (!ticker || !target) return alert("Enter ticker and target currency");
+
+  const infoDiv = document.getElementById('info');
+  const measureDiv = document.getElementById('measure');
+  measureDiv.textContent = "";
+  document.getElementById('dataTable').style.display = "none";
+  infoDiv.textContent = "Starting…";
+
+  try {
+    infoDiv.textContent = "Fetching price data…";
+    const priceUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=max&interval=1d`;
+    const priceRes = await fetch(priceUrl);
+    const priceJson = await priceRes.json();
+    const result = priceJson.chart.result?.[0];
+    if (!result) throw new Error("Ticker not found or no data");
+
+    const timestamps = result.timestamp;
+    const prices = result.indicators.quote[0].close;
+    detectedCurrency = result.meta.currency;
+    const firstDate = new Date(result.meta.firstTradeDate * 1000);
+
+    const priceTable = [];
+    for (let i = 0; i < timestamps.length; i++) {
+      if (prices[i] != null) {
+        priceTable.push({
+          date: new Date(timestamps[i] * 1000).toISOString().slice(0,10),
+          price: prices[i]
+        });
+      }
+    }
+    const startDate = priceTable[0].date;
+    const endDate = priceTable[priceTable.length - 1].date;
+
+    infoDiv.textContent = `Fetching FX data for ${detectedCurrency} → ${target}…`;
+    const fxUrl = `https://api.exchangerate.host/timeseries?start_date=${startDate}&end_date=${endDate}&base=${detectedCurrency}&symbols=${target}`;
+    const fxRes = await fetch(fxUrl);
+    const fxJson = await fxRes.json();
+    if (!fxJson.rates) throw new Error("FX data not found");
+
+    infoDiv.textContent = "Processing FX and merging with price data…";
+    let lastFx = null;
+    const fxTable = {};
+    Object.keys(fxJson.rates).sort().forEach(d => {
+      const v = fxJson.rates[d][target];
+      if (v != null) lastFx = v;
+      if (lastFx != null) fxTable[d] = lastFx;
+    });
+
+    fullData = priceTable.filter(r => fxTable[r.date])
+      .map(r => ({
+        date: r.date,
+        original: r.price,
+        fx: fxTable[r.date],
+        converted: r.price * fxTable[r.date]
+      }));
+
+    infoDiv.innerHTML = `Detected currency: <b>${detectedCurrency}</b> | Data since: <b>${firstDate.toISOString().slice(0,10)}</b>`;
+    
+    populateTable();
+    infoDiv.textContent += " | Plotting chart…";
+    setRange('MAX');
+    infoDiv.textContent += " ✅ Done";
+
+  } catch (err) {
+    infoDiv.textContent = `Error: ${err.message}`;
+    console.error(err);
+  }
+}
+
+
+function setRange(range) {
+  currentRange = range;
+  if (!fullData.length) return;
+
+  const now = new Date();
+  let start;
+  switch(range){
+    case '5Y': start = new Date(now.setFullYear(now.getFullYear()-5)); break;
+    case '1Y': start = new Date(now.setFullYear(now.getFullYear()-1)); break;
+    case '6M': start = new Date(now.setMonth(now.getMonth()-6)); break;
+    case '3M': start = new Date(now.setMonth(now.getMonth()-3)); break;
+    case 'YTD': start = new Date(new Date().getFullYear(),0,1); break;
+    default: start = null;
+  }
+
+  const view = start ? fullData.filter(r => new Date(r.date) >= start) : fullData;
+  plot(view);
+}
+
+function plot(data){
+  const trace = {
+    x: data.map(r => r.date),
+    y: data.map(r => r.converted),
+    type: 'scatter',
+    mode: 'lines',
+    name: `Price in ${document.getElementById('targetCurrency').value}`
+  };
+
+  Plotly.newPlot('chart', [trace], {
+    title: `Value in ${document.getElementById('targetCurrency').value}`,
+    xaxis: { title: 'Date' },
+    yaxis: { title: 'Converted Price' },
+    dragmode: 'select'
+  });
+
+  // Attach selection listener for drag-to-measure
+  const measureDiv = document.getElementById('measure');
+  const y = trace.y;
+  const x = trace.x;
+
+  document.getElementById('chart').on('plotly_selected', function(eventData){
+    if(!eventData) return;
+    const indices = eventData.points.map(p=>p.pointIndex);
+    const startIdx = Math.min(...indices);
+    const endIdx = Math.max(...indices);
+    const startVal = y[startIdx], endVal = y[endIdx];
+    const pct = ((endVal - startVal)/startVal*100).toFixed(2);
+    measureDiv.textContent = `From ${x[startIdx]} to ${x[endIdx]}: Δ = ${((endVal-startVal).toFixed(2))}, % change = ${pct}%`;
+  });
+}
+
+function populateTable(){
+  const tbody = document.querySelector("#dataTable tbody");
+  tbody.innerHTML = "";
+  fullData.forEach(r=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${r.date}</td><td>${r.original.toFixed(2)} ${detectedCurrency}</td><td>${r.fx.toFixed(4)}</td><td>${r.converted.toFixed(2)}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function toggleTable(){
+  const tbl = document.getElementById('dataTable');
+  tbl.style.display = (tbl.style.display==='none') ? 'table' : 'none';
+}
+</script>
+
+</body>
+</html>
